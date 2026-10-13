@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ระบบติดตามงานครู</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: #f1f5f9; color: #172554;
+      font-family: system-ui, sans-serif;
+    }
+    main { max-width: 900px; margin: auto; padding: 24px 16px; }
+    header {
+      background: #172554; color: white;
+      padding: 24px; border-radius: 16px;
+    }
+    header p { margin-bottom: 0; color: #fde68a; }
+    section, article {
+      background: white; padding: 20px;
+      margin-top: 16px; border-radius: 14px;
+      border: 1px solid #e2e8f0;
+    }
+    h1 { font-size: 24px; margin: 0; }
+    h2 { font-size: 20px; }
+    label { display: block; margin-top: 12px; }
+    input, textarea, select, button {
+      font: inherit; padding: 12px; border-radius: 8px;
+    }
+    input, textarea, select {
+      width: 100%; margin-top: 6px;
+      border: 1px solid #cbd5e1;
+    }
+    textarea { min-height: 90px; resize: vertical; }
+    button {
+      border: 0; background: #1d4ed8; color: white;
+      cursor: pointer; min-height: 44px;
+    }
+    button:disabled { opacity: .5; cursor: wait; }
+    .actions {
+      display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px;
+    }
+    .secondary { background: #475569; }
+    .danger { background: #b91c1c; }
+    .summary {
+      padding: 16px; background: #dbeafe;
+      border-radius: 12px; margin-top: 16px;
+    }
+    .muted { color: #64748b; }
+    .detail { white-space: pre-wrap; overflow-wrap: anywhere; }
+    #message {
+      white-space: pre-wrap; overflow-wrap: anywhere;
+      padding: 12px 0; color: #166534;
+    }
+    [hidden] { display: none !important; }
+    @media (max-width: 600px) {
+      header, section, article { padding: 16px; }
+      h1 { font-size: 21px; }
+      .actions button { flex: 1; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>ระบบบันทึกและติดตามงานครู</h1>
+    <p>โรงเรียนชุมชนบ้านศรีฐาน</p>
+  </header>
+
+  <div id="message" role="status" aria-live="polite"></div>
+
+  <section id="loginPanel">
+    <h2>เข้าสู่ระบบ</h2>
+    <form id="loginForm">
+      <label for="email">อีเมล</label>
+      <input id="email" type="email" autocomplete="username" required>
+
+      <label for="password">รหัสผ่าน</label>
+      <input id="password" type="password"
+             autocomplete="current-password" required>
+
+      <div class="actions">
+        <button type="submit">เข้าสู่ระบบ</button>
+      </div>
+    </form>
+  </section>
+
+  <div id="appPanel" hidden>
+    <section>
+      <div id="userEmail" class="detail"></div>
+      <div class="actions">
+        <button id="refreshButton" class="secondary">โหลดข้อมูลใหม่</button>
+        <button id="logoutButton" class="secondary">ออกจากระบบ</button>
+      </div>
+    </section>
+
+    <div id="summary" class="summary"></div>
+
+    <section>
+      <h2 id="formHeading">เพิ่มงานใหม่</h2>
+      <form id="taskForm">
+        <label for="title">ชื่องาน</label>
+        <input id="title" maxlength="200" required>
+
+        <label for="description">รายละเอียด</label>
+        <textarea id="description"></textarea>
+
+        <label for="dueDate">วันครบกำหนด</label>
+        <input id="dueDate" type="date">
+
+        <div class="actions">
+          <button type="submit">บันทึกงาน</button>
+          <button id="cancelButton" type="button"
+                  class="secondary" hidden>ยกเลิกการแก้ไข</button>
+        </div>
+      </form>
+    </section>
+
+    <section>
+      <label for="filter">แสดงรายการ</label>
+      <select id="filter">
+        <option value="all">งานทั้งหมด</option>
+        <option value="pending">ยังไม่เสร็จ</option>
+        <option value="done">เสร็จแล้ว</option>
+      </select>
+    </section>
+
+    <div id="taskList"></div>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+const PROJECT_URL = 'https://efsbvnwrnuxrxciyipmt.supabase.co';
+const PUBLISHABLE_KEY =
+  'sb_publishable_wq9onqzGPc1fu1HFFb7TMw_N0RFOCul';
+
+const $ = id => document.getElementById(id);
+let db, currentUser = null, tasks = [], editingId = null;
+let busy = false;
+
+function message(text, error = false) {
+  $('message').textContent = text;
+  $('message').style.color = error ? '#b91c1c' : '#166534';
+}
+
+async function perform(action) {
+  if (busy) return;
+  busy = true;
+  document.querySelectorAll('button').forEach(b => b.disabled = true);
+  try {
+    await action();
+  } catch (error) {
+    message(error.message || 'เกิดข้อผิดพลาด กรุณาลองใหม่', true);
+  } finally {
+    busy = false;
+    document.querySelectorAll('button').forEach(b => b.disabled = false);
+  }
+}
+
+function resetForm() {
+  editingId = null;
+  $('taskForm').reset();
+  $('formHeading').textContent = 'เพิ่มงานใหม่';
+  $('cancelButton').hidden = true;
+}
+
+function showUser(user) {
+  currentUser = user;
+  tasks = [];
+  resetForm();
+  $('taskList').replaceChildren();
+  $('summary').textContent = '';
+  $('loginPanel').hidden = !!user;
+  $('appPanel').hidden = !user;
+  $('userEmail').textContent = user ? 'ผู้ใช้งาน: ' + user.email : '';
+}
+
+function textElement(tag, text, className = '') {
+  const element = document.createElement(tag);
+  element.textContent = text;
+  element.className = className;
+  return element;
+}
+
+function actionButton(text, className, action) {
+  const button = textElement('button', text, className);
+  button.type = 'button';
+  button.addEventListener('click', () => perform(action));
+  return button;
+}
+
+function renderTasks() {
+  const done = tasks.filter(t => t.status === 'done').length;
+  $('summary').textContent =
+    `ทั้งหมด ${tasks.length} งาน • ยังไม่เสร็จ ${tasks.length - done} งาน • เสร็จแล้ว ${done} งาน`;
+
+  const filter = $('filter').value;
+  const visible = tasks.filter(t => filter === 'all' || t.status === filter);
+  $('taskList').replaceChildren();
+
+  if (!visible.length) {
+    $('taskList').append(textElement('p', 'ไม่มีรายการงานในมุมมองนี้', 'muted'));
+    return;
+  }
+
+  visible.forEach(task => {
+    const card = document.createElement('article');
+    card.append(textElement('h2', task.title, 'detail'));
+    card.append(textElement('p', task.description || 'ไม่มีรายละเอียด', 'detail'));
+
+    const due = task.due_date
+      ? new Date(task.due_date + 'T00:00:00').toLocaleDateString('th-TH')
+      : 'ไม่ได้กำหนด';
+    card.append(textElement(
+      'p',
+      `ครบกำหนด: ${due} • ${task.status === 'done' ? 'เสร็จแล้ว' : 'ยังไม่เสร็จ'}`,
+      'muted'
+    ));
+
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+
+    actions.append(actionButton(
+      task.status === 'done' ? 'เปลี่ยนเป็นยังไม่เสร็จ' : 'ทำเสร็จแล้ว',
+      '',
+      async () => {
+        const { data, error } = await db.from('tasks')
+          .update({ status: task.status === 'done' ? 'pending' : 'done' })
+          .eq('id', task.id).eq('user_id', currentUser.id)
+          .select('id').single();
+        if (error) throw error;
+        await loadTasks();
+        message('เปลี่ยนสถานะเรียบร้อย');
+      }
+    ));
+
+    actions.append(actionButton('แก้ไข', 'secondary', async () => {
+      editingId = task.id;
+      $('title').value = task.title;
+      $('description').value = task.description;
+      $('dueDate').value = task.due_date || '';
+      $('formHeading').textContent = 'แก้ไขงาน';
+      $('cancelButton').hidden = false;
+      $('taskForm').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      $('title').focus();
+    }));
+
+    actions.append(actionButton('ลบ', 'danger', async () => {
+      if (!confirm('ต้องการลบงาน "' + task.title + '" หรือไม่?')) return;
+      const { data, error } = await db.from('tasks')
+        .delete().eq('id', task.id).eq('user_id', currentUser.id)
+        .select('id').single();
+      if (error) throw error;
+      if (editingId === task.id) resetForm();
+      await loadTasks();
+      message('ลบงานเรียบร้อย');
+    }));
+
+    card.append(actions);
+    $('taskList').append(card);
+  });
+}
+
+async function loadTasks() {
+  if (!currentUser) return;
+  const { data, error } = await db.from('tasks')
+    .select('id,title,description,due_date,status,created_at')
+    .eq('user_id', currentUser.id)
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  tasks = data || [];
+  renderTasks();
+}
+
+$('loginForm').addEventListener('submit', event => {
+  event.preventDefault();
+  perform(async () => {
+    message('กำลังเข้าสู่ระบบ...');
+    const { data, error } = await db.auth.signInWithPassword({
+      email: $('email').value.trim(),
+      password: $('password').value
+    });
+    if (error) throw error;
+    $('password').value = '';
+    showUser(data.user);
+    await loadTasks();
+    message('เข้าสู่ระบบสำเร็จ');
+  });
+});
+
+$('taskForm').addEventListener('submit', event => {
+  event.preventDefault();
+  perform(async () => {
+    const title = $('title').value.trim();
+    if (!title) throw new Error('กรุณาระบุชื่องาน');
+
+    const payload = {
+      title,
+      description: $('description').value.trim(),
+      due_date: $('dueDate').value || null
+    };
+
+    let result;
+    if (editingId) {
+      result = await db.from('tasks').update(payload)
+        .eq('id', editingId).eq('user_id', currentUser.id)
+        .select('id').single();
+    } else {
+      result = await db.from('tasks')
+        .insert({ ...payload, user_id: currentUser.id })
+        .select('id').single();
+    }
+
+    if (result.error) throw result.error;
+    resetForm();
+    await loadTasks();
+    message('บันทึกงานเรียบร้อย');
+  });
+});
+
+$('cancelButton').addEventListener('click', resetForm);
+$('filter').addEventListener('change', renderTasks);
+$('refreshButton').addEventListener('click', () => perform(async () => {
+  await loadTasks();
+  message('โหลดข้อมูลเรียบร้อย');
+}));
+$('logoutButton').addEventListener('click', () => perform(async () => {
+  const { error } = await db.auth.signOut();
+  if (error) throw error;
+  showUser(null);
+  message('ออกจากระบบเรียบร้อย');
+}));
+
+perform(async () => {
+  if (!window.supabase) {
+    throw new Error('โหลด Supabase ไม่สำเร็จ กรุณาตรวจอินเทอร์เน็ตแล้วรีเฟรช');
+  }
+  db = window.supabase.createClient(PROJECT_URL, PUBLISHABLE_KEY);
+
+  db.auth.onAuthStateChange((event, session) => {
+    if (event === 'SIGNED_OUT') showUser(null);
+  });
+
+  const { data, error } = await db.auth.getSession();
+  if (error) throw error;
+  showUser(data.session?.user || null);
+  if (currentUser) await loadTasks();
+});
+</script>
+</body>
+</html>
